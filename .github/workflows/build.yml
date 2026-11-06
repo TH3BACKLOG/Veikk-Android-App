@@ -1,7 +1,10 @@
 name: Build APK
 on:
   push:
+    branches: [main]
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -14,8 +17,25 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.7
-      - run: gradle assembleDebug
+      - name: Build
+        id: build
+        continue-on-error: true
+        run: gradle assembleDebug --console=plain > build.log 2>&1
+      - name: Save log to buildlog branch
+        run: |
+          tail -n 200 build.log > last-build-log.txt
+          echo "outcome=${{ steps.build.outcome }}" >> last-build-log.txt
+          git config user.name github-actions
+          git config user.email actions@github.com
+          git checkout -B buildlog
+          git add -f last-build-log.txt
+          git commit -m "build log"
+          git push -f origin buildlog
       - uses: actions/upload-artifact@v4
+        if: steps.build.outcome == 'success'
         with:
           name: veikk-reader-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+      - name: Fail if build failed
+        if: steps.build.outcome == 'failure'
+        run: exit 1

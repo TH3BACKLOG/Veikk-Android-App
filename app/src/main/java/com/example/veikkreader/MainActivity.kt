@@ -98,7 +98,7 @@ class MainActivity : Activity(), UsbTabletReader.Listener {
     }
 
     private fun handleIntent(i: Intent?) {
-        if (i?.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) {
+        if (i != null && i.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) {
             UsbTabletReader.deviceFrom(i)?.let { reader.request(it) }
         }
     }
