@@ -5,10 +5,13 @@ import android.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.DialogInterface
 import android.content.Intent
 import android.hardware.usb.UsbManager
 import android.graphics.Typeface
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -22,6 +25,7 @@ class MainActivity : Activity(), UsbTabletReader.Listener {
     private lateinit var canvasView: TabletView
     private lateinit var learnBtn: Button
 
+    private lateinit var mapper: ButtonMapper
     private var cfg = ParserConfig()
     private val parser = ReportParser(cfg)
 
@@ -37,6 +41,7 @@ class MainActivity : Activity(), UsbTabletReader.Listener {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        mapper = ButtonMapper(this)
         reader = UsbTabletReader(this, this)
         reader.register()
 
@@ -70,8 +75,13 @@ class MainActivity : Activity(), UsbTabletReader.Listener {
             addView(btn("Clear") { canvasView.clear() })
             addView(btn("Copy log") { copyLog() })
         }
+        val row3 = LinearLayout(this).apply {
+            addView(btn("Buttons") { buttonsMenu() })
+            addView(btn("Undo") { canvasView.undo() })
+        }
         root.addView(row1)
         root.addView(row2)
+        root.addView(row3)
 
         canvasView = TabletView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
@@ -144,6 +154,93 @@ class MainActivity : Activity(), UsbTabletReader.Listener {
         }
     }
 
+    // ---- tablet button mapping ----
+
+    private fun doAct(a: Act) {
+        when (a) {
+            Act.CLEAR -> canvasView.clear()
+            Act.UNDO -> canvasView.undo()
+            Act.ROTATE -> canvasView.turn = (canvasView.turn + 1) and 3
+            Act.BRUSH_UP -> canvasView.brush = (canvasView.brush * 1.4f).coerceAtMost(6f)
+            Act.BRUSH_DOWN -> canvasView.brush = (canvasView.brush / 1.4f).coerceAtLeast(0.3f)
+            Act.ERASER -> canvasView.eraser = !canvasView.eraser
+            Act.COLOR -> canvasView.nextColor()
+        }
+        status.text = "Button: " + a.label
+    }
+
+    private fun buttonsMenu() {
+        val list = mapper.snapshot()
+        val items = ArrayList<String>()
+        for (e in list) items.add(e.second.label + "  <-  " + e.first.describe() + "   (tap to remove)")
+        items.add("+ Add a button")
+        items.add("Remove all")
+        AlertDialog.Builder(this)
+            .setTitle("Tablet buttons")
+            .setItems(items.toTypedArray()) { _, i ->
+                if (i < list.size) {
+                    mapper.remove(list[i].first)
+                    status.text = "Removed."
+                } else if (i == list.size) {
+                    addMapping()
+                } else {
+                    mapper.clearAll()
+                    status.text = "All button mappings removed."
+                }
+            }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
+    private fun addMapping() {
+        val acts = Act.values()
+        AlertDialog.Builder(this)
+            .setTitle("What should the button do?")
+            .setItems(acts.map { it.label }.toTypedArray()) { _, i -> learnButton(acts[i]) }
+            .show()
+    }
+
+    private fun learnButton(act: Act) {
+        val h = Handler(Looper.getMainLooper())
+        val dlg = AlertDialog.Builder(this)
+            .setTitle(act.label)
+            .setMessage(
+                "Make sure the tablet is connected. Hold the pen hovering just above the tablet " +
+                    "(don't touch it down) and keep your hands off the buttons. Then tap Start."
+            )
+            .setPositiveButton("Start", null)
+            .setNegativeButton("Cancel") { _, _ -> mapper.cancel() }
+            .create()
+        dlg.setOnDismissListener { mapper.cancel() }
+        dlg.show()
+        val startBtn = dlg.getButton(DialogInterface.BUTTON_POSITIVE)
+        startBtn.setOnClickListener {
+            startBtn.isEnabled = false
+            dlg.setMessage("Step 1/2: recording the idle state. Keep the pen hovering, don't press anything...")
+            mapper.startBaseline()
+            h.postDelayed({
+                if (!dlg.isShowing) return@postDelayed
+                dlg.setMessage("Step 2/2: now press and release the tablet button 3 times.")
+                mapper.startPress()
+                h.postDelayed({
+                    if (!dlg.isShowing) return@postDelayed
+                    val sig = mapper.finishPress()
+                    if (sig == null) {
+                        dlg.setMessage(
+                            "Didn't see a button. Is the tablet connected and sending data? " +
+                                "Tap Start to try again."
+                        )
+                        startBtn.isEnabled = true
+                    } else {
+                        mapper.add(sig, act)
+                        status.text = "Mapped: " + act.label + "  <-  " + sig.describe()
+                        dlg.dismiss()
+                    }
+                }, 5000)
+            }, 2500)
+        }
+    }
+
     private fun setConfig(c: ParserConfig) {
         cfg = c
         parser.cfg = c
@@ -201,7 +298,9 @@ class MainActivity : Activity(), UsbTabletReader.Listener {
 
     override fun onReport(data: ByteArray, ifaceId: Int) {
         if (learning) synchronized(learned) { if (learned.size < 3000) learned.add(data) }
-        val s = parser.parse(data)
+        val acts = mapper.onReport(ifaceId, data, cfg)
+        if (acts.isNotEmpty()) runOnUiThread { for (a in acts) doAct(a) }
+        val s = if (mapper.isButtonReport(ifaceId, data)) null else parser.parse(data)
         runOnUiThread {
             count++
             val h = hex(data)

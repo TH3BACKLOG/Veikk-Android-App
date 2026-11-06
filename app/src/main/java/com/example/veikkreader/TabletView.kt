@@ -5,6 +5,8 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
 import android.view.MotionEvent
 import android.view.View
 
@@ -31,6 +33,44 @@ class TabletView(ctx: Context) : View(ctx) {
     private var cy = -1f
     private var cDown = false
 
+    /** Brush size multiplier. */
+    var brush = 1f
+
+    var eraser = false
+        set(v) {
+            field = v
+            stroke.xfermode = if (v) PorterDuffXfermode(PorterDuff.Mode.CLEAR) else null
+        }
+
+    private val colors = intArrayOf(
+        Color.WHITE, Color.RED, Color.YELLOW, Color.GREEN,
+        Color.rgb(255, 128, 0), Color.MAGENTA, Color.rgb(80, 140, 255)
+    )
+    private var colorIdx = 0
+
+    fun nextColor() {
+        colorIdx = (colorIdx + 1) % colors.size
+        stroke.color = colors[colorIdx]
+        eraser = false
+    }
+
+    private val undoStack = java.util.ArrayDeque<Bitmap>()
+
+    private fun pushUndo() {
+        val b = bmp ?: return
+        undoStack.addLast(b.copy(Bitmap.Config.ARGB_8888, false))
+        while (undoStack.size > 6) undoStack.removeFirst()
+    }
+
+    fun undo() {
+        val b = bmp ?: return
+        val prev = undoStack.pollLast() ?: return
+        b.eraseColor(Color.TRANSPARENT)
+        bc?.drawBitmap(prev, 0f, 0f, null)
+        wasDown = false
+        invalidate()
+    }
+
     /** Quarter-turns applied to tablet coordinates (0..3), to match how the tablet is held. */
     var turn = 0
 
@@ -44,9 +84,11 @@ class TabletView(ctx: Context) : View(ctx) {
         bmp?.let { Canvas(nb).drawBitmap(it, 0f, 0f, null) }
         bmp = nb
         bc = Canvas(nb)
+        undoStack.clear()
     }
 
     fun clear() {
+        pushUndo()
         bmp?.eraseColor(Color.TRANSPARENT)
         wasDown = false
         invalidate()
@@ -68,7 +110,8 @@ class TabletView(ctx: Context) : View(ctx) {
     private fun pen(x: Float, y: Float, pressure: Float, down: Boolean) {
         val c = bc ?: return
         if (down) {
-            stroke.strokeWidth = 2f + pressure * 24f
+            if (!wasDown) pushUndo()
+            stroke.strokeWidth = (2f + pressure * 24f) * brush
             if (wasDown) c.drawLine(lx, ly, x, y, stroke) else c.drawPoint(x, y, stroke)
             lx = x
             ly = y
