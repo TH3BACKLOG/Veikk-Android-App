@@ -57,10 +57,20 @@ data class ButtonSig(
     }
 }
 
+object Actions {
+    fun label(code: String): String =
+        if (code.startsWith("KEY:")) "Key " + code.substringAfter('|')
+        else (runCatching { Act.valueOf(code).label }.getOrNull() ?: code)
+
+    fun keys(code: String): List<Int>? =
+        if (!code.startsWith("KEY:")) null
+        else code.substring(4).substringBefore('|').split("+").mapNotNull { it.toIntOrNull() }
+}
+
 class ButtonMapper(ctx: Context) {
     private val prefs = ctx.getSharedPreferences("buttons", Context.MODE_PRIVATE)
     private val lk = Any()
-    private val map = ArrayList<Pair<ButtonSig, Act>>()
+    private val map = ArrayList<Pair<ButtonSig, String>>()
     private val active = HashMap<ButtonSig, Boolean>()
 
     private var phase = 0 // 0 = normal, 1 = recording idle baseline, 2 = recording button presses
@@ -71,22 +81,24 @@ class ButtonMapper(ctx: Context) {
     init {
         val txt = prefs.getString("map", "") ?: ""
         for (line in txt.split("\n")) {
-            val eq = line.indexOf('=')
+            var eq = line.indexOf('\t')
+            if (eq <= 0) eq = line.indexOf('=')
             if (eq <= 0) continue
-            val act = runCatching { Act.valueOf(line.substring(0, eq)) }.getOrNull() ?: continue
+            val code = line.substring(0, eq)
+            if (Actions.label(code) == code) continue
             val sig = ButtonSig.fromText(line.substring(eq + 1)) ?: continue
-            map.add(Pair(sig, act))
+            map.add(Pair(sig, code))
         }
     }
 
     private fun save() {
-        val s = map.joinToString("\n") { it.second.name + "=" + it.first.toText() }
+        val s = map.joinToString("\n") { it.second + "\t" + it.first.toText() }
         prefs.edit().putString("map", s).apply()
     }
 
-    fun snapshot(): List<Pair<ButtonSig, Act>> = synchronized(lk) { ArrayList(map) }
+    fun snapshot(): List<Pair<ButtonSig, String>> = synchronized(lk) { ArrayList(map) }
 
-    fun add(sig: ButtonSig, act: Act) {
+    fun add(sig: ButtonSig, act: String) {
         synchronized(lk) {
             map.removeAll { it.first == sig }
             map.add(Pair(sig, act))
@@ -163,20 +175,20 @@ class ButtonMapper(ctx: Context) {
         i == c.x || i == c.x + 1 || i == c.y || i == c.y + 1 || (c.p >= 0 && (i == c.p || i == c.p + 1))
 
     /** Feed every raw report here. Returns the actions to run (button just went down). */
-    fun onReport(iface: Int, d: ByteArray, cfg: ParserConfig): List<Act> {
-        if (d.isEmpty()) return emptyList()
+    fun onReport(iface: Int, d: ByteArray, cfg: ParserConfig): List<String> {
+        if (d.isEmpty()) return emptyList<String>()
         return synchronized(lk) {
             val useId = cfg.id >= 0
             if (phase == 1) {
                 val a = base.getOrPut(gkey(iface, d, useId)) { IntArray(d.size) }
                 for (i in d.indices) a[i] = a[i] or (d[i].toInt() and 0xFF)
-                return@synchronized emptyList<Act>()
+                return@synchronized emptyList<String>()
             }
             if (phase == 2) {
                 learnPress(iface, d, cfg)
-                return@synchronized emptyList<Act>()
+                return@synchronized emptyList<String>()
             }
-            val out = ArrayList<Act>()
+            val out = ArrayList<String>()
             for ((sig, act) in map) {
                 if (!sig.sameGroup(iface, d)) continue
                 val m = sig.matches(d)
@@ -184,7 +196,7 @@ class ButtonMapper(ctx: Context) {
                 if (m && !was) out.add(act)
                 active[sig] = m
             }
-            out as List<Act>
+            out as List<String>
         }
     }
 

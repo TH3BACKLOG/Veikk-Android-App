@@ -9,12 +9,14 @@ import android.content.DialogInterface
 import android.content.Intent
 import android.hardware.usb.UsbManager
 import android.graphics.Typeface
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.Toast
 import android.widget.TextView
 
 class MainActivity : Activity(), UsbTabletReader.Listener {
@@ -42,6 +44,9 @@ class MainActivity : Activity(), UsbTabletReader.Listener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         mapper = ButtonMapper(this)
+        if (Build.VERSION.SDK_INT >= 33) {
+            requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 7)
+        }
         reader = UsbTabletReader(this, this)
         reader.register()
 
@@ -78,6 +83,7 @@ class MainActivity : Activity(), UsbTabletReader.Listener {
         val row3 = LinearLayout(this).apply {
             addView(btn("Buttons") { buttonsMenu() })
             addView(btn("Undo") { canvasView.undo() })
+            addView(btn("Key setup") { keySetup() })
         }
         root.addView(row1)
         root.addView(row2)
@@ -156,7 +162,14 @@ class MainActivity : Activity(), UsbTabletReader.Listener {
 
     // ---- tablet button mapping ----
 
-    private fun doAct(a: Act) {
+    private fun doAct(code: String) {
+        val keys = Actions.keys(code)
+        if (keys != null) {
+            if (KeySender.granted()) KeySender.send(keys)
+            else status.text = "Key not sent: open Key setup and allow Shizuku first."
+            return
+        }
+        val a = runCatching { Act.valueOf(code) }.getOrNull() ?: return
         when (a) {
             Act.CLEAR -> canvasView.clear()
             Act.UNDO -> canvasView.undo()
@@ -169,10 +182,37 @@ class MainActivity : Activity(), UsbTabletReader.Listener {
         status.text = "Button: " + a.label
     }
 
+    private fun keySetup() {
+        val running = KeySender.running()
+        val granted = KeySender.granted()
+        val msg = "To send keyboard keys to other apps, this app uses Shizuku (a free helper app).\n\n" +
+            "1. Install Shizuku and start it (in Shizuku: \"Start via Wireless debugging\", Android 11+).\n" +
+            "2. Tap Allow keys below.\n\n" +
+            "Shizuku running: " + (if (running) "yes" else "no") + "\n" +
+            "Permission for this app: " + (if (granted) "yes" else "no")
+        AlertDialog.Builder(this)
+            .setTitle("Key setup")
+            .setMessage(msg)
+            .setPositiveButton("Allow keys") { _, _ ->
+                if (!running) Toast.makeText(this, "Shizuku isn't running yet.", Toast.LENGTH_LONG).show()
+                else KeySender.requestPermission()
+            }
+            .setNeutralButton("Open Shizuku") { _, _ ->
+                val i = packageManager.getLaunchIntentForPackage("moe.shizuku.privileged.api")
+                if (i != null) startActivity(i)
+                else Toast.makeText(this, "Shizuku isn't installed.", Toast.LENGTH_LONG).show()
+            }
+            .setNegativeButton("Test (volume up)") { _, _ ->
+                if (granted) KeySender.send(listOf(24))
+                else Toast.makeText(this, "Not allowed yet.", Toast.LENGTH_LONG).show()
+            }
+            .show()
+    }
+
     private fun buttonsMenu() {
         val list = mapper.snapshot()
         val items = ArrayList<String>()
-        for (e in list) items.add(e.second.label + "  <-  " + e.first.describe() + "   (tap to remove)")
+        for (e in list) items.add(Actions.label(e.second) + "  <-  " + e.first.describe() + "   (tap to remove)")
         items.add("+ Add a button")
         items.add("Remove all")
         AlertDialog.Builder(this)
@@ -194,16 +234,52 @@ class MainActivity : Activity(), UsbTabletReader.Listener {
 
     private fun addMapping() {
         val acts = Act.values()
+        val items = ArrayList<String>()
+        items.add("Keyboard key / shortcut...")
+        for (a in acts) items.add(a.label)
         AlertDialog.Builder(this)
             .setTitle("What should the button do?")
-            .setItems(acts.map { it.label }.toTypedArray()) { _, i -> learnButton(acts[i]) }
+            .setItems(items.toTypedArray()) { _, i ->
+                if (i == 0) pickKey() else learnButton(acts[i - 1].name)
+            }
             .show()
     }
 
-    private fun learnButton(act: Act) {
+    private fun pickKey() {
+        val items = ArrayList<String>(Keys.presets)
+        items.add("Type my own...")
+        AlertDialog.Builder(this)
+            .setTitle("Which key?")
+            .setItems(items.toTypedArray()) { _, i ->
+                if (i < Keys.presets.size) learnButton(Keys.toCode(Keys.presets[i])!!)
+                else typeKey()
+            }
+            .show()
+    }
+
+    private fun typeKey() {
+        val et = EditText(this).apply { hint = "ctrl+shift+z"; setSingleLine() }
+        AlertDialog.Builder(this)
+            .setTitle("Type the key")
+            .setMessage(
+                "Join with +. Names: a-z, 0-9, f1-f12, ctrl, shift, alt, meta, space, enter, esc, tab, " +
+                    "backspace, delete, up, down, left, right, pageup, pagedown, [ ] - = , . / ; ' plus, " +
+                    "back, home, recents, volup, voldown"
+            )
+            .setView(et)
+            .setPositiveButton("Next") { _, _ ->
+                val code = Keys.toCode(et.text.toString())
+                if (code == null) Toast.makeText(this, "Didn't understand that key.", Toast.LENGTH_LONG).show()
+                else learnButton(code)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun learnButton(code: String) {
         val h = Handler(Looper.getMainLooper())
         val dlg = AlertDialog.Builder(this)
-            .setTitle(act.label)
+            .setTitle(Actions.label(code))
             .setMessage(
                 "Make sure the tablet is connected. Hold the pen hovering just above the tablet " +
                     "(don't touch it down) and keep your hands off the buttons. Then tap Start."
@@ -213,31 +289,39 @@ class MainActivity : Activity(), UsbTabletReader.Listener {
             .create()
         dlg.setOnDismissListener { mapper.cancel() }
         dlg.show()
-        val startBtn = dlg.getButton(DialogInterface.BUTTON_POSITIVE)
-        startBtn.setOnClickListener {
-            startBtn.isEnabled = false
-            dlg.setMessage("Step 1/2: recording the idle state. Keep the pen hovering, don't press anything...")
-            mapper.startBaseline()
-            h.postDelayed({
-                if (!dlg.isShowing) return@postDelayed
-                dlg.setMessage("Step 2/2: now press and release the tablet button 3 times.")
-                mapper.startPress()
+        val btn = dlg.getButton(DialogInterface.BUTTON_POSITIVE)
+        var stage = 0
+        btn.setOnClickListener {
+            if (stage == 0) {
+                stage = 1
+                btn.isEnabled = false
+                dlg.setMessage("Step 1/2: recording the idle state. Keep the pen hovering, don't press anything...")
+                mapper.startBaseline()
                 h.postDelayed({
                     if (!dlg.isShowing) return@postDelayed
-                    val sig = mapper.finishPress()
-                    if (sig == null) {
-                        dlg.setMessage(
-                            "Didn't see a button. Is the tablet connected and sending data? " +
-                                "Tap Start to try again."
-                        )
-                        startBtn.isEnabled = true
-                    } else {
-                        mapper.add(sig, act)
-                        status.text = "Mapped: " + act.label + "  <-  " + sig.describe()
-                        dlg.dismiss()
-                    }
-                }, 5000)
-            }, 2500)
+                    dlg.setMessage(
+                        "Step 2/2: now press and release the tablet button several times (at least 3). " +
+                            "Take your time, then tap Done."
+                    )
+                    mapper.startPress()
+                    btn.text = "Done"
+                    btn.isEnabled = true
+                    stage = 2
+                }, 2500)
+            } else if (stage == 2) {
+                val sig = mapper.finishPress()
+                if (sig == null) {
+                    dlg.setMessage(
+                        "Didn't see a button. Is the tablet connected and sending data? Tap Start to try again."
+                    )
+                    btn.text = "Start"
+                    stage = 0
+                } else {
+                    mapper.add(sig, code)
+                    status.text = "Mapped: " + Actions.label(code) + "  <-  " + sig.describe()
+                    dlg.dismiss()
+                }
+            }
         }
     }
 
@@ -286,6 +370,13 @@ class MainActivity : Activity(), UsbTabletReader.Listener {
         runOnUiThread {
             status.text = msg
             header.append("# ").append(msg).append('\n')
+            if (msg.startsWith("Connected to")) {
+                try {
+                    val si = Intent(this, KeepAliveService::class.java)
+                    if (Build.VERSION.SDK_INT >= 26) startForegroundService(si) else startService(si)
+                } catch (t: Throwable) {
+                }
+            }
         }
     }
 
