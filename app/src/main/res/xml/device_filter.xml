@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 0x2FEB = 12267, the vendor ID VEIKK tablets normally report -->
+    <usb-device vendor-id="12267" />
+</resources>
