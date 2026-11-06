@@ -52,7 +52,10 @@ class TabletView(ctx: Context) : View(ctx) {
         invalidate()
     }
 
+    private var lastUsb = 0L
+
     fun addSample(s: PenSample) {
+        lastUsb = System.currentTimeMillis()
         val (nx, ny) = when (turn and 3) {
             0 -> s.x to s.y
             1 -> (1 - s.y) to s.x
@@ -86,6 +89,10 @@ class TabletView(ctx: Context) : View(ctx) {
     }
 
     private fun handle(e: MotionEvent) {
+        // While real tablet data is flowing, ignore the system's mouse/pen pointer events
+        // (the tablet also shows up as a mouse, which would yank the cursor back).
+        val usbLive = System.currentTimeMillis() - lastUsb < 3000
+        if (usbLive && e.getToolType(0) != MotionEvent.TOOL_TYPE_FINGER) return
         val down = e.actionMasked == MotionEvent.ACTION_DOWN || e.actionMasked == MotionEvent.ACTION_MOVE
         pen(e.x, e.y, e.pressure.coerceIn(0f, 1f), down)
     }
